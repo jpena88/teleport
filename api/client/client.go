@@ -1636,13 +1636,14 @@ func (c *Client) SearchEvents(ctx context.Context, fromUTC, toUTC time.Time, nam
 }
 
 // SearchSessionEvents allows searching for session events with a full pagination support.
-func (c *Client) SearchSessionEvents(ctx context.Context, fromUTC time.Time, toUTC time.Time, limit int, order types.EventOrder, startKey string) ([]events.AuditEvent, string, error) {
+func (c *Client) SearchSessionEvents(ctx context.Context, fromUTC, toUTC time.Time, limit int, order types.EventOrder, startKey, withParticipant string) ([]events.AuditEvent, string, error) {
 	request := &proto.GetSessionEventsRequest{
-		StartDate: fromUTC,
-		EndDate:   toUTC,
-		Limit:     int32(limit),
-		StartKey:  startKey,
-		Order:     proto.Order(order),
+		StartDate:       fromUTC,
+		EndDate:         toUTC,
+		Limit:           int32(limit),
+		StartKey:        startKey,
+		Order:           proto.Order(order),
+		WithParticipant: withParticipant,
 	}
 
 	response, err := c.grpc.GetSessionEvents(ctx, request, c.callOpts...)

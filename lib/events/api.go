@@ -621,14 +621,14 @@ type IAuditLog interface {
 	SearchEvents(fromUTC, toUTC time.Time, namespace string, eventTypes []string, limit int, order types.EventOrder, startKey string) ([]apievents.AuditEvent, string, error)
 
 	// SearchSessionEvents is a flexible way to find session events.
-	// Only session events are returned by this function.
-	// This is used to find completed session.
+	// Only session.end events are returned by this function.
+	// This is used to find completed sessions.
 	//
 	// Event types to filter can be specified and pagination is handled by an iterator key that allows
 	// a query to be resumed.
 	//
 	// This function may never return more than 1 MiB of event data.
-	SearchSessionEvents(fromUTC time.Time, toUTC time.Time, limit int, order types.EventOrder, startKey string) ([]apievents.AuditEvent, string, error)
+	SearchSessionEvents(fromUTC, toUTC time.Time, limit int, order types.EventOrder, startKey, withParticipant string) ([]apievents.AuditEvent, string, error)
 
 	// WaitForDelivery waits for resources to be released and outstanding requests to
 	// complete after calling Close method
@@ -682,6 +682,23 @@ func (f EventFields) GetString(key string) string {
 	return v
 }
 
+// GetStrings returns a slice-of-strings representation of a logged field.
+func (f EventFields) GetStrings(key string) []string {
+	val, found := f[key]
+	if !found {
+		return []string{}
+	}
+	slice, _ := val.([]interface{})
+	res := make([]string, 0, len(slice))
+	for _, v := range slice {
+		s, ok := v.(string)
+		if ok {
+			res = append(res, s)
+		}
+	}
+	return res
+}
+
 // GetInt returns an int representation of a logged field
 func (f EventFields) GetInt(key string) int {
 	val, found := f[key]
@@ -716,4 +733,10 @@ func (f EventFields) GetTime(key string) time.Time {
 func (f EventFields) HasField(key string) bool {
 	_, ok := f[key]
 	return ok
+}
+
+// SearchEventsFilter holds the attributes that events can be filtered by.
+type SearchEventsFilter struct {
+	EventTypes         []string
+	SessionParticipant string
 }

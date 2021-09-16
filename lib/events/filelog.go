@@ -31,8 +31,10 @@ import (
 	"time"
 
 	"github.com/gravitational/teleport"
+	apidefaults "github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
+	apiutils "github.com/gravitational/teleport/api/utils"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/utils"
@@ -208,6 +210,10 @@ func (l *FileLog) EmitAuditEventLegacy(event Event, fields EventFields) error {
 // This function may never return more than 1 MiB of event data.
 func (l *FileLog) SearchEvents(fromUTC, toUTC time.Time, namespace string, eventTypes []string, limit int, order types.EventOrder, startAfter string) ([]apievents.AuditEvent, string, error) {
 	l.Debugf("SearchEvents(%v, %v, namespace=%v, eventType=%v, limit=%v)", fromUTC, toUTC, namespace, eventTypes, limit)
+	return l.searchEventsWithFilter(fromUTC, toUTC, namespace, limit, order, startAfter, SearchEventsFilter{EventTypes: eventTypes})
+}
+
+func (l *FileLog) searchEventsWithFilter(fromUTC, toUTC time.Time, namespace string, limit int, order types.EventOrder, startAfter string, filter SearchEventsFilter) ([]apievents.AuditEvent, string, error) {
 	if limit <= 0 {
 		limit = defaults.EventsIterationLimit
 	}
@@ -229,7 +235,7 @@ func (l *FileLog) SearchEvents(fromUTC, toUTC time.Time, namespace string, event
 
 	// Fetch events from each file for further filtering.
 	for _, file := range filesToSearch {
-		eventsFromFile, err := l.findInFile(file.path, eventTypes)
+		eventsFromFile, err := l.findInFile(file.path, filter)
 		if err != nil {
 			return nil, "", trace.Wrap(err)
 		}
@@ -353,44 +359,14 @@ func getCheckpointFromEvent(event apievents.AuditEvent) (string, error) {
 	return event.GetID(), nil
 }
 
-func (l *FileLog) SearchSessionEvents(fromUTC, toUTC time.Time, limit int, order types.EventOrder, startKey string) ([]apievents.AuditEvent, string, error) {
-	l.Debugf("SearchSessionEvents(%v, %v, %v, %v)", fromUTC, toUTC, order, limit)
-
-	// only search for specific event types
-	eventTypes := []string{SessionStartEvent, SessionEndEvent}
-
-	// because of the limit and distributed nature of auth server event
-	// logs, some events can be fetched with session end event and without
-	// session start event. to fix this, the code below filters out the events without
-	// start event to guarantee that all events in the range will get fetched
-	events, lastKey, err := l.SearchEvents(fromUTC, toUTC, "default", eventTypes, limit, order, startKey)
-	if err != nil {
-		return nil, lastKey, trace.Wrap(err)
+func (l *FileLog) SearchSessionEvents(fromUTC, toUTC time.Time, limit int, order types.EventOrder, startKey, withParticipant string) ([]apievents.AuditEvent, string, error) {
+	l.Debugf("SearchSessionEvents(%v, %v, order=%v, limit=%v)", fromUTC, toUTC, order, limit)
+	filter := SearchEventsFilter{
+		EventTypes:         []string{SessionEndEvent},
+		SessionParticipant: withParticipant,
 	}
-
-	// filter out 'session end' events that do not
-	// have a corresponding 'session start' event
-	started := make(map[string]struct{}, len(events)/2)
-	filtered := make([]apievents.AuditEvent, 0, len(events))
-	for i := range events {
-		event := events[i]
-		eventType := event.GetType()
-		sessionID := GetSessionID(event)
-		if sessionID == "" {
-			continue
-		}
-		if eventType == SessionStartEvent {
-			started[sessionID] = struct{}{}
-			filtered = append(filtered, event)
-		}
-		if eventType == SessionEndEvent {
-			if _, ok := started[sessionID]; ok {
-				filtered = append(filtered, event)
-			}
-		}
-	}
-
-	return filtered, lastKey, nil
+	events, lastKey, err := l.searchEventsWithFilter(fromUTC, toUTC, apidefaults.Namespace, limit, order, startKey, filter)
+	return events, lastKey, trace.Wrap(err)
 }
 
 // Close closes the audit log, which inluces closing all file handles and releasing
@@ -590,10 +566,9 @@ func parseFileTime(filename string) (time.Time, error) {
 	return time.Parse(defaults.AuditLogTimeFormat, base)
 }
 
-// findInFile scans a given log file and returns events that fit the criteria
-// This simplistic implementation ONLY SEARCHES FOR EVENT TYPE(s)
-func (l *FileLog) findInFile(path string, eventFilter []string) ([]EventFields, error) {
-	l.Debugf("Called findInFile(%s, %v).", path, eventFilter)
+// findInFile scans a given log file and returns events that fit the criteria.
+func (l *FileLog) findInFile(path string, filter SearchEventsFilter) ([]EventFields, error) {
+	l.Debugf("Called findInFile(%s, %v).", path, filter)
 	retval := make([]EventFields, 0)
 
 	// open the log file:
@@ -607,18 +582,22 @@ func (l *FileLog) findInFile(path string, eventFilter []string) ([]EventFields, 
 	scanner := bufio.NewScanner(lf)
 
 	for lineNo := 0; scanner.Scan(); lineNo++ {
-		accepted := len(eventFilter) == 0
 		// optimization: to avoid parsing JSON unnecessarily, lets see if we
-		// can filter out lines that don't even have the requested event type on the line
-		for i := range eventFilter {
-			if strings.Contains(scanner.Text(), eventFilter[i]) {
-				accepted = true
+		// can filter out lines that don't even have the requested strings on the line
+		if filter.SessionParticipant != "" && !strings.Contains(scanner.Text(), filter.SessionParticipant) {
+			continue
+		}
+		match := len(filter.EventTypes) == 0
+		for _, eventType := range filter.EventTypes {
+			if strings.Contains(scanner.Text(), eventType) {
+				match = true
 				break
 			}
 		}
-		if !accepted {
+		if !match {
 			continue
 		}
+
 		// parse JSON on the line and compare event type field to what's
 		// in the query:
 		var ef EventFields
@@ -626,13 +605,16 @@ func (l *FileLog) findInFile(path string, eventFilter []string) ([]EventFields, 
 			l.Warnf("invalid JSON in %s line %d", path, lineNo)
 			continue
 		}
-		for i := range eventFilter {
-			if ef.GetString(EventType) == eventFilter[i] {
+		if filter.SessionParticipant != "" && !apiutils.SliceContainsStr(ef.GetStrings(SessionParticipants), filter.SessionParticipant) {
+			continue
+		}
+		accepted := len(filter.EventTypes) == 0
+		for _, eventType := range filter.EventTypes {
+			if ef.GetString(EventType) == eventType {
 				accepted = true
 				break
 			}
 		}
-
 		if accepted {
 			retval = append(retval, ef)
 		}

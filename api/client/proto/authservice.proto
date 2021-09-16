@@ -1018,6 +1018,9 @@ message GetSessionEventsRequest {
     // Order specifies an ascending or descending order of events.
     // A value of 0 means a descending order and a value of 1 means an ascending order.
     Order Order = 5;
+    // WithParticipant, if set, restricts the returned session events only to
+    // those in which the specified user is involved as a participant.
+    string WithParticipant = 6;
 }
 
 message Events {
@@ -1546,9 +1549,9 @@ service AuthService {
     // ResetAuthPreference resets cluster auth preference to defaults.
     rpc ResetAuthPreference(google.protobuf.Empty) returns (google.protobuf.Empty);
 
-    // Out-of-session request for audit events.
+    // GetEvents gets events from the audit log.
     rpc GetEvents(GetEventsRequest) returns (Events);
-    // In-session request for audit events.
+    // GetSessionEvents gets completed session events from the audit log.
     rpc GetSessionEvents(GetSessionEventsRequest) returns (Events);
 
     // GetLock gets a lock by name.

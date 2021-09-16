@@ -263,6 +263,9 @@ type event struct {
 	CreatedAt      int64  `firestore:"createdAt,omitempty"`
 	Fields         string `firestore:"fields,omitempty"`
 	EventNamespace string `firestore:"eventNamespace,omitempty"`
+
+	// SessionParticipants allows filtering session.end events by participant.
+	SessionParticipants []string `json:"SessionParticipants,omitempty"`
 }
 
 // New returns new instance of Firestore backend.
@@ -323,13 +326,21 @@ func (l *Log) EmitAuditEvent(ctx context.Context, in apievents.AuditEvent) error
 		// key distribution
 		sessionID = uuid.New()
 	}
+
+	var sessionParticipants []string
+	sessionEnd, ok := in.(*apievents.SessionEnd)
+	if ok {
+		sessionParticipants = sessionEnd.Participants
+	}
+
 	event := event{
-		SessionID:      sessionID,
-		EventIndex:     in.GetIndex(),
-		EventType:      in.GetType(),
-		EventNamespace: apidefaults.Namespace,
-		CreatedAt:      in.GetTime().Unix(),
-		Fields:         string(data),
+		SessionID:           sessionID,
+		EventIndex:          in.GetIndex(),
+		EventType:           in.GetType(),
+		EventNamespace:      apidefaults.Namespace,
+		CreatedAt:           in.GetTime().Unix(),
+		Fields:              string(data),
+		SessionParticipants: sessionParticipants,
 	}
 	start := time.Now()
 	_, err = l.svc.Collection(l.CollectionName).Doc(l.getDocIDForEvent(event)).Create(l.svcContext, event)
@@ -363,12 +374,13 @@ func (l *Log) EmitAuditEventLegacy(ev events.Event, fields events.EventFields) e
 		return trace.Wrap(err)
 	}
 	event := event{
-		SessionID:      sessionID,
-		EventIndex:     int64(eventIndex),
-		EventType:      fields.GetString(events.EventType),
-		EventNamespace: apidefaults.Namespace,
-		CreatedAt:      created.Unix(),
-		Fields:         string(data),
+		SessionID:           sessionID,
+		EventIndex:          int64(eventIndex),
+		EventType:           fields.GetString(events.EventType),
+		EventNamespace:      apidefaults.Namespace,
+		CreatedAt:           created.Unix(),
+		Fields:              string(data),
+		SessionParticipants: fields.GetStrings(events.SessionParticipants),
 	}
 	start := time.Now()
 	_, err = l.svc.Collection(l.CollectionName).Doc(l.getDocIDForEvent(event)).Create(l.svcContext, event)
@@ -397,12 +409,13 @@ func (l *Log) PostSessionSlice(slice events.SessionSlice) error {
 			return trace.Wrap(err)
 		}
 		event := event{
-			SessionID:      slice.SessionID,
-			EventNamespace: apidefaults.Namespace,
-			EventType:      chunk.EventType,
-			EventIndex:     chunk.EventIndex,
-			CreatedAt:      time.Unix(0, chunk.Time).In(time.UTC).Unix(),
-			Fields:         string(data),
+			SessionID:           slice.SessionID,
+			EventNamespace:      apidefaults.Namespace,
+			EventType:           chunk.EventType,
+			EventIndex:          chunk.EventIndex,
+			CreatedAt:           time.Unix(0, chunk.Time).In(time.UTC).Unix(),
+			Fields:              string(data),
+			SessionParticipants: fields.GetStrings(events.SessionParticipants),
 		}
 		batch.Create(l.svc.Collection(l.CollectionName).Doc(l.getDocIDForEvent(event)), event)
 	}
@@ -472,13 +485,17 @@ func (l *Log) GetSessionEvents(namespace string, sid session.ID, after int, inlc
 //
 // This function may never return more than 1 MiB of event data.
 func (l *Log) SearchEvents(fromUTC, toUTC time.Time, namespace string, eventTypes []string, limit int, order types.EventOrder, startKey string) ([]apievents.AuditEvent, string, error) {
+	return l.searchEventsWithFilter(fromUTC, toUTC, namespace, limit, order, startKey, events.SearchEventsFilter{EventTypes: eventTypes})
+}
+
+func (l *Log) searchEventsWithFilter(fromUTC, toUTC time.Time, namespace string, limit int, order types.EventOrder, startKey string, filter events.SearchEventsFilter) ([]apievents.AuditEvent, string, error) {
 	var eventsArr []apievents.AuditEvent
 	var estimatedSize int
 	checkpoint := startKey
 	left := limit
 
 	for {
-		gotEvents, withSize, withCheckpoint, err := l.searchEventsOnce(fromUTC, toUTC, namespace, eventTypes, left, order, checkpoint, events.MaxEventBytesInResponse-estimatedSize)
+		gotEvents, withSize, withCheckpoint, err := l.searchEventsOnce(fromUTC, toUTC, namespace, left, order, checkpoint, filter, events.MaxEventBytesInResponse-estimatedSize)
 		if nil != err {
 			return nil, "", trace.Wrap(err)
 		}
@@ -496,9 +513,8 @@ func (l *Log) SearchEvents(fromUTC, toUTC time.Time, namespace string, eventType
 	return eventsArr, checkpoint, nil
 }
 
-func (l *Log) searchEventsOnce(fromUTC, toUTC time.Time, namespace string, eventTypes []string, limit int, order types.EventOrder, startKey string, spaceRemaining int) ([]apievents.AuditEvent, int, string, error) {
-	g := l.WithFields(log.Fields{"From": fromUTC, "To": toUTC, "Namespace": namespace, "EventTypes": eventTypes, "Limit": limit, "StartKey": startKey})
-	doFilter := len(eventTypes) > 0
+func (l *Log) searchEventsOnce(fromUTC, toUTC time.Time, namespace string, limit int, order types.EventOrder, startKey string, filter events.SearchEventsFilter, spaceRemaining int) ([]apievents.AuditEvent, int, string, error) {
+	g := l.WithFields(log.Fields{"From": fromUTC, "To": toUTC, "Namespace": namespace, "Filter": filter, "Limit": limit, "StartKey": startKey})
 
 	var lastKey int64
 	var values []events.EventFields
@@ -568,18 +584,21 @@ func (l *Log) searchEventsOnce(fromUTC, toUTC time.Time, namespace string, event
 		if err := json.Unmarshal(data, &fields); err != nil {
 			return nil, 0, "", trace.Errorf("failed to unmarshal event %v", err)
 		}
-		var accepted bool
-		for i := range eventTypes {
-			if fields.GetString(events.EventType) == eventTypes[i] {
+		if filter.SessionParticipant != "" && !apiutils.SliceContainsStr(fields.GetStrings(events.SessionParticipants), filter.SessionParticipant) {
+			continue
+		}
+		accepted := len(filter.EventTypes) == 0
+		for _, eventType := range filter.EventTypes {
+			if fields.GetString(events.EventType) == eventType {
 				accepted = true
 				break
 			}
 		}
-		if accepted || !doFilter {
+
+		if accepted {
 			if totalSize+len(data) >= spaceRemaining {
 				break
 			}
-
 			lastKey = docSnap.Data()["createdAt"].(int64)
 			values = append(values, fields)
 			totalSize += len(data)
@@ -618,14 +637,13 @@ func (l *Log) searchEventsOnce(fromUTC, toUTC time.Time, namespace string, event
 }
 
 // SearchSessionEvents returns session related events only. This is used to
-// find completed session.
-func (l *Log) SearchSessionEvents(fromUTC time.Time, toUTC time.Time, limit int, order types.EventOrder, startKey string) ([]apievents.AuditEvent, string, error) {
-	// only search for specific event types
-	query := []string{
-		events.SessionStartEvent,
-		events.SessionEndEvent,
+// find completed sessions.
+func (l *Log) SearchSessionEvents(fromUTC, toUTC time.Time, limit int, order types.EventOrder, startKey, withParticipant string) ([]apievents.AuditEvent, string, error) {
+	filter := events.SearchEventsFilter{
+		EventTypes:         []string{events.SessionEndEvent},
+		SessionParticipant: withParticipant,
 	}
-	return l.SearchEvents(fromUTC, toUTC, apidefaults.Namespace, query, limit, order, startKey)
+	return l.searchEventsWithFilter(fromUTC, toUTC, apidefaults.Namespace, limit, order, startKey, filter)
 }
 
 // WaitForDelivery waits for resources to be released and outstanding requests to
