@@ -1278,39 +1278,63 @@ func TestDeleteMFADeviceSync(t *testing.T) {
 	require.NoError(t, err)
 
 	// Insert dummy devices.
-	deviceToDelete, err := insertDummyTOTPDevice(srv, username, "otp")
+	totpToDelete, err := insertDummyTOTPDevice(srv, username, "otp")
 	require.NoError(t, err)
-	u2fDev, err := insertDummyU2FDevice(srv, username, "u2f")
+	u2fToDelete, err := insertDummyU2FDevice(srv, username, "u2f")
 	require.NoError(t, err)
-	totpDev, err := insertDummyTOTPDevice(srv, username, "otp2")
+	totpDev, err := insertDummyTOTPDevice(srv, username, "u2f2")
 	require.NoError(t, err)
-
-	// Acquire an approved token.
-	token, err := srv.Auth().newUserToken(CreateUserTokenRequest{
-		Name: username,
-		TTL:  5 * time.Minute,
-		Type: UserTokenTypeRecoveryApproved,
-	})
-	require.NoError(t, err)
-	_, err = srv.Auth().Identity.CreateUserToken(context.Background(), token)
+	u2fDev, err := insertDummyTOTPDevice(srv, username, "otp2")
 	require.NoError(t, err)
 
-	// Delete the TOTP device.
-	err = srv.Auth().DeleteMFADeviceSync(ctx, &proto.DeleteMFADeviceSyncRequest{
-		TokenID:    token.GetName(),
-		DeviceName: deviceToDelete.GetName(),
-	})
-	require.NoError(t, err)
+	tests := []struct {
+		name           string
+		deviceToDelete string
+		tokenReq       CreateUserTokenRequest
+	}{
+		{
+			name:           "recovery approved token",
+			deviceToDelete: totpToDelete.GetName(),
+			tokenReq: CreateUserTokenRequest{
+				Name: username,
+				TTL:  5 * time.Minute,
+				Type: UserTokenTypeRecoveryApproved,
+			},
+		},
+		{
+			name:           "privilege token",
+			deviceToDelete: u2fToDelete.GetName(),
+			tokenReq: CreateUserTokenRequest{
+				Name: username,
+				TTL:  5 * time.Minute,
+				Type: UserTokenTypePrivilege,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			token, err := srv.Auth().newUserToken(tc.tokenReq)
+			require.NoError(t, err)
+			_, err = srv.Auth().Identity.CreateUserToken(ctx, token)
+			require.NoError(t, err)
+
+			// Delete the TOTP device.
+			err = srv.Auth().DeleteMFADeviceSync(ctx, &proto.DeleteMFADeviceSyncRequest{
+				TokenID:    token.GetName(),
+				DeviceName: tc.deviceToDelete,
+			})
+			require.NoError(t, err)
+		})
+	}
 
 	// Check it's been deleted.
-	res, err := srv.Auth().GetMFADevices(ctx, &proto.GetMFADevicesRequest{
-		RecoveryApprovedTokenID: token.GetName(),
-	})
+	devs, err := srv.Auth().Identity.GetMFADevices(ctx, username, false)
 	require.NoError(t, err)
-	require.Greater(t, len(res.GetDevices()), 1)
-	require.ElementsMatch(t, []*types.MFADevice{u2fDev, totpDev}, res.GetDevices())
+	require.Greater(t, len(devs), 1)
+	require.ElementsMatch(t, []*types.MFADevice{u2fDev, totpDev}, devs)
 
-	// Test events emitted.
+	// Test last events emitted.
 	event := mockEmitter.LastEvent()
 	require.Equal(t, events.MFADeviceDeleteEvent, event.GetType())
 	require.Equal(t, events.MFADeviceDeleteEventCode, event.GetCode())
@@ -1613,6 +1637,7 @@ func TestAddMFADeviceSync(t *testing.T) {
 
 				// Create register challenge and sign.
 				u2fRegRes, _, err := getMockedU2FAndRegisterRes(srv.Auth(), privExToken.GetName())
+				require.NoError(t, err)
 
 				return &proto.AddMFADeviceSyncRequest{
 					PrivilegeTokenID: privExToken.GetName(),
