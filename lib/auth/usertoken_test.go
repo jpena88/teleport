@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gravitational/teleport"
+	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
 	"github.com/gravitational/teleport/lib/backend"
@@ -231,7 +232,15 @@ func TestUserTokenSecretsCreationSettings(t *testing.T) {
 	token, err := srv.Auth().CreateResetPasswordToken(ctx, req)
 	require.NoError(t, err)
 
-	secrets, err := srv.Auth().RotateUserTokenSecrets(context.TODO(), token.GetName())
+	_, err = srv.Auth().CreateRegisterChallenge(ctx, &proto.CreateRegisterChallengeRequest{
+		TokenID:    token.GetName(),
+		DeviceType: proto.DeviceType_DEVICE_TYPE_TOTP,
+	})
+	require.NoError(t, err)
+
+	secrets, err := srv.Auth().Identity.GetUserTokenSecrets(ctx, token.GetName())
+	require.NoError(t, err)
+
 	require.NoError(t, err)
 	require.Equal(t, secrets.GetName(), token.GetName())
 	require.Equal(t, token.GetMetadata().Expires, secrets.GetMetadata().Expires)
