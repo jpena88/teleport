@@ -132,3 +132,8 @@ IAM ARN of the user used by the read-only cluster.
   ]
 }
 ```
+
+### Key Access
+
+All IAM users that are to use the key must be specified with their respective ARNs
+in the policy in order to grant access. By default, IAM users do not have access to any key.
