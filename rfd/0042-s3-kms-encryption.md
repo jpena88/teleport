@@ -23,6 +23,11 @@ parameter will be added to the S3 storage url with the name of `sse_kms_key`.
 This URL parameter can be specified with the value of the KMS ID of the desired
 custom key. When configured all objects uploaded will be encrypted with that key.
 
+Example:
+```
+"s3://teleport-demo-bucket/records?sse_kms_key=1234abcd-12ab-34cd-56ef-1234567890ab"
+```
+
 The configured KMS CMK needs to have a standard spec configuration and must be symmetric.
 
 Below template KMS policies are provided for restricting access to
