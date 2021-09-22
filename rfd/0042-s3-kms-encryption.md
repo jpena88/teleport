@@ -36,7 +36,7 @@ the IAM user the authentication nodes authenticate as.
 
 ### Encryption/Decryption
 
-This policy allows an IAM user to encrypt and decryption objects.
+This policy allows an IAM user to encrypt and decrypt objects.
 This allows a cluster auth to write and play back session recordings.
 
 Replace `[iam-key-admin-arn]` with the IAM ARN of the user(s) that should have
