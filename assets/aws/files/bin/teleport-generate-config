@@ -109,6 +109,7 @@ write_ssh_and_tunnel_section() {
     PASSED_EXTERNAL_TUNNEL_PORT="$1"
     SSH_PORT=3023
     POSTGRES_PORT=443
+    MYSQL_PORT=3306
     if [[ "${TELEPORT_PROXY_SERVER_LB}" != "" ]]; then
         # ACM
         if [[ "${USE_ACM}" == "true" ]]; then
@@ -125,6 +126,8 @@ write_ssh_and_tunnel_section() {
                 # when using ACM, we have to add a specific public addr for postgres which lives on the NLB
                 # (rather than the ACM ALB) so that Teleport's multiplexer can be used to route connections
                 POSTGRES_HOSTNAME="${TELEPORT_PROXY_SERVER_NLB_ALIAS}"
+                # if an alias for the ACM NLB is configured, use that for the proxy's mysql_public_addr
+                MYSQL_HOSTNAME="${TELEPORT_PROXY_SERVER_NLB_ALIAS}"
             fi
         # non-ACM
         else
@@ -146,6 +149,12 @@ write_ssh_and_tunnel_section() {
     # if not, don't add it and use teleport's default
     if [[ "${POSTGRES_HOSTNAME}" != "" ]]; then
       echo "  postgres_public_addr: ${POSTGRES_HOSTNAME}:${POSTGRES_PORT}" >> ${USE_CONFIG_PATH}
+    fi
+    # if mysql hostname is set, add it to the config
+    # if not, don't add it and use teleport's default
+    if [[ "${MYSQL_HOSTNAME}" != "" ]]; then
+      echo "  mysql_public_addr: ${MYSQL_HOSTNAME}:${MYSQL_PORT}" >> ${USE_CONFIG_PATH}
+      echo "  mysql_listen_addr: 0.0.0.0:${MYSQL_PORT}"  >> ${USE_CONFIG_PATH}
     fi
     cat << EOS >> ${USE_CONFIG_PATH}
   ssh_public_addr: ${SSH_HOSTNAME}:${SSH_PORT}
